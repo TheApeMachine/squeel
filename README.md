@@ -1,4 +1,4 @@
-[![Tests](https://github.com/johndoe/awesome-project/actions/workflows/tests.yml/badge.svg)](https://github.com/johndoe/awesome-project/actions/workflows/tests.yml)
+[![Tests](https://github.com/theapemachine/squeel/actions/workflows/tests.yml/badge.svg)](https://github.com/theapemachine/squeel/actions/workflows/tests.yml)
 
 # Squeel 🔄
 
