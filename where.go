@@ -10,10 +10,26 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
+/*
+Package-level variables for SQL parsing. The uuidRegex is used to validate
+and identify UUID strings in the SQL query.
+*/
 var (
 	uuidRegex = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 )
 
+/*
+parseWhere processes the WHERE clause of a SQL query and converts it into
+MongoDB query filters. It handles various types of conditions including
+comparisons, functions, AND/OR operations, and range conditions.
+
+Parameters:
+- q: The Query object to modify
+- node: The WHERE clause node to process
+
+Returns:
+- The modified Query object with filter conditions applied
+*/
 func (statement *Statement) parseWhere(q *Query, node *sqlparser.Where) *Query {
 	if node == nil {
 		return q
@@ -23,6 +39,18 @@ func (statement *Statement) parseWhere(q *Query, node *sqlparser.Where) *Query {
 	return q
 }
 
+/*
+parseWhereExpr processes a single expression from the WHERE clause and converts
+it into appropriate MongoDB query filters. It handles different types of
+expressions including comparisons, functions, AND/OR operations, and ranges.
+
+Parameters:
+- q: The Query object to modify
+- expr: The expression to process
+
+Returns:
+- The modified Query object with the expression's filter applied
+*/
 func (statement *Statement) parseWhereExpr(q *Query, expr sqlparser.Expr) *Query {
 	switch expr := expr.(type) {
 	case *sqlparser.ComparisonExpr:
@@ -53,6 +81,18 @@ func (statement *Statement) parseWhereExpr(q *Query, expr sqlparser.Expr) *Query
 	return q
 }
 
+/*
+parseComparison processes a comparison expression and converts it into a MongoDB
+filter condition. It handles different types of left-hand expressions including
+functions, columns, and values.
+
+Parameters:
+- q: The Query object to modify
+- expr: The comparison expression to process
+
+Returns:
+- The modified Query object with the comparison filter applied
+*/
 func (statement *Statement) parseComparison(q *Query, expr *sqlparser.ComparisonExpr) *Query {
 	switch left := expr.Left.(type) {
 	case *sqlparser.FuncExpr:
@@ -67,6 +107,18 @@ func (statement *Statement) parseComparison(q *Query, expr *sqlparser.Comparison
 	return q
 }
 
+/*
+handleFuncComparison processes function-based comparisons, particularly handling
+aggregate functions and array operations. It converts SQL functions into
+equivalent MongoDB aggregation operations.
+
+Parameters:
+- q: The Query object to modify
+- expr: The function expression to process
+
+Returns:
+- The modified Query object with the function comparison applied
+*/
 func (statement *Statement) handleFuncComparison(q *Query, expr *sqlparser.FuncExpr) *Query {
 	switch expr.Name.Lowered() {
 	case "array_contains":
@@ -105,6 +157,18 @@ func (statement *Statement) handleFuncComparison(q *Query, expr *sqlparser.FuncE
 	}
 }
 
+/*
+handleArrayContains processes the ARRAY_CONTAINS function, converting it into
+a MongoDB $in operator. It expects exactly two arguments: the array field and
+the value to search for.
+
+Parameters:
+- q: The Query object to modify
+- expr: The ARRAY_CONTAINS function expression
+
+Returns:
+- The modified Query object with the array contains filter applied
+*/
 func (statement *Statement) handleArrayContains(q *Query, expr *sqlparser.FuncExpr) *Query {
 	if len(expr.Exprs) != 2 {
 		logDebug("ARRAY_CONTAINS requires 2 arguments, but got %d", len(expr.Exprs))
@@ -125,6 +189,19 @@ func (statement *Statement) handleArrayContains(q *Query, expr *sqlparser.FuncEx
 	return q
 }
 
+/*
+handleColumnComparison processes column-based comparisons, converting them into
+appropriate MongoDB filter conditions. It handles various comparison operators
+and special cases for ID fields.
+
+Parameters:
+- q: The Query object to modify
+- col: The column being compared
+- expr: The full comparison expression
+
+Returns:
+- The modified Query object with the column comparison filter applied
+*/
 func (statement *Statement) handleColumnComparison(q *Query, col *sqlparser.ColName, expr *sqlparser.ComparisonExpr) *Query {
 	field := strings.TrimPrefix(strings.Join([]string{col.Qualifier.Name.String(), col.Name.String()}, "."), ".")
 	value, ok := statement.parseComparisonRight(expr.Right, q.Collection)
@@ -135,6 +212,17 @@ func (statement *Statement) handleColumnComparison(q *Query, col *sqlparser.ColN
 	return statement.applyFilter(q, field, expr.Operator, value)
 }
 
+/*
+parseComparisonRight processes the right-hand side of a comparison expression,
+converting SQL values into appropriate MongoDB values.
+
+Parameters:
+- right: The right-hand expression to parse
+- collection: The current collection name (for context)
+
+Returns:
+- The parsed value and whether parsing was successful
+*/
 func (statement *Statement) parseComparisonRight(right sqlparser.Expr, _ string) (interface{}, bool) {
 	switch right := right.(type) {
 	case *sqlparser.SQLVal:
@@ -147,10 +235,30 @@ func (statement *Statement) parseComparisonRight(right sqlparser.Expr, _ string)
 	return nil, false
 }
 
+/*
+getQualifiedName builds a fully qualified column name from a ColName node,
+including any table qualifier if present.
+
+Parameters:
+- col: The column name node
+
+Returns:
+- The fully qualified column name as a string
+*/
 func (statement *Statement) getQualifiedName(col *sqlparser.ColName) string {
 	return strings.TrimPrefix(strings.Join([]string{col.Qualifier.Name.String(), col.Name.String()}, "."), ".")
 }
 
+/*
+parseValTupleValues processes a tuple of values (as used in IN clauses) and
+converts them into a slice of MongoDB-compatible values.
+
+Parameters:
+- tuple: The tuple of values to parse
+
+Returns:
+- A slice of parsed values and whether parsing was successful
+*/
 func (statement *Statement) parseValTupleValues(tuple *sqlparser.ValTuple) ([]interface{}, bool) {
 	values := make([]interface{}, 0, len(*tuple))
 	for _, val := range *tuple {
@@ -161,6 +269,16 @@ func (statement *Statement) parseValTupleValues(tuple *sqlparser.ValTuple) ([]in
 	return values, true
 }
 
+/*
+parseTupleValue processes a single value from a tuple, converting it into
+a MongoDB-compatible value.
+
+Parameters:
+- val: The expression to parse
+
+Returns:
+- The parsed value, or nil if parsing failed
+*/
 func (statement *Statement) parseTupleValue(val sqlparser.Expr) interface{} {
 	switch v := val.(type) {
 	case *sqlparser.SQLVal:
@@ -172,6 +290,16 @@ func (statement *Statement) parseTupleValue(val sqlparser.Expr) interface{} {
 	}
 }
 
+/*
+parseSQLValue converts a SQL value into its appropriate Go/MongoDB type.
+Currently handles integer values specially, with other types defaulting to strings.
+
+Parameters:
+- val: The SQL value to parse
+
+Returns:
+- The parsed value in its appropriate Go type
+*/
 func (statement *Statement) parseSQLValue(val *sqlparser.SQLVal) interface{} {
 	switch val.Type {
 	case sqlparser.IntVal:
@@ -182,6 +310,18 @@ func (statement *Statement) parseSQLValue(val *sqlparser.SQLVal) interface{} {
 	return string(val.Val)
 }
 
+/*
+handleValueComparison processes value-based comparisons, particularly handling
+the IN operator when used with a column reference.
+
+Parameters:
+- q: The Query object to modify
+- val: The SQL value being compared
+- expr: The full comparison expression
+
+Returns:
+- The modified Query object with the value comparison filter applied
+*/
 func (statement *Statement) handleValueComparison(q *Query, val *sqlparser.SQLVal, expr *sqlparser.ComparisonExpr) *Query {
 	if expr.Operator != "in" {
 		return q
@@ -203,6 +343,20 @@ func (statement *Statement) handleValueComparison(q *Query, val *sqlparser.SQLVa
 	return q
 }
 
+/*
+applyFilter adds a filter condition to the Query based on the field, operator,
+and value provided. It handles special cases for ID fields and supports various
+MongoDB comparison operators.
+
+Parameters:
+- q: The Query object to modify
+- field: The field name to filter on
+- operator: The comparison operator to use
+- value: The value to compare against
+
+Returns:
+- The modified Query object with the filter applied
+*/
 func (statement *Statement) applyFilter(q *Query, field, operator string, value interface{}) *Query {
 	var filter bson.E
 
@@ -244,6 +398,18 @@ func (statement *Statement) applyFilter(q *Query, field, operator string, value 
 	return q
 }
 
+/*
+isIDField determines whether a field represents an ID in the given collection.
+It checks for common ID field patterns including "_id", fields ending in "Id",
+and special cases for the "Accounts" field.
+
+Parameters:
+- field: The field name to check
+- collection: The collection name for context
+
+Returns:
+- true if the field is an ID field, false otherwise
+*/
 func isIDField(field string, collection string) bool {
 	return field == "_id" ||
 		strings.HasSuffix(field, "Id") ||

@@ -12,6 +12,12 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+/*
+makeLegacyBinVal converts a base64 encoded string to a MongoDB Binary type
+
+with subtype 3. It handles spaces in the input by replacing them with '+' characters
+before decoding.
+*/
 func (statement *Statement) makeLegacyBinVal(value string) (
 	binval primitive.Binary, err error,
 ) {
@@ -24,11 +30,22 @@ func (statement *Statement) makeLegacyBinVal(value string) (
 	}, errnie.Error(err)
 }
 
+/*
+makeint64Pointer converts a SQL value to an int64 pointer. This is useful
+
+when dealing with nullable integer columns in SQL that need to be represented
+as pointers in Go.
+*/
 func (statement *Statement) makeint64Pointer(value *sqlparser.SQLVal) (*int64, error) {
 	tmp, err := strconv.ParseInt(string(value.Val), 10, 64)
 	return &tmp, errnie.Error(err)
 }
 
+/*
+HexToBase64 converts a hexadecimal string to its base64 encoded representation.
+
+If the hex decoding fails, it returns an empty byte slice and logs the error.
+*/
 func (statement *Statement) HexToBase64(in string) []byte {
 	rawBytes, err := hex.DecodeString(in)
 
@@ -43,6 +60,13 @@ func (statement *Statement) HexToBase64(in string) []byte {
 	return buf
 }
 
+/*
+CSUUID converts a UUID string to a MongoDB Binary type using a specific
+
+reordering pattern. It removes any curly braces and hyphens from the UUID,
+then reorders the bytes according to the required format before converting
+to base64 and creating a Binary value.
+*/
 func (statement *Statement) CSUUID(uuid string) (primitive.Binary, error) {
 	cleanUUID := strings.NewReplacer("{", "", "}", "", "-", "").Replace(uuid)
 
@@ -54,6 +78,12 @@ func (statement *Statement) CSUUID(uuid string) (primitive.Binary, error) {
 	return statement.makeLegacyBinVal(string(statement.HexToBase64(reordered)))
 }
 
+/*
+makeLegacyBinVal is a package-level function that converts a base64 encoded
+
+string to a MongoDB Binary type with subtype 3. It handles spaces in the input
+by replacing them with '+' characters before decoding.
+*/
 func makeLegacyBinVal(value string) (
 	binval primitive.Binary, err error,
 ) {
@@ -66,6 +96,12 @@ func makeLegacyBinVal(value string) (
 	}, errnie.Error(err)
 }
 
+/*
+HexToBase64 is a package-level function that converts a hexadecimal string
+
+to its base64 encoded representation. If the hex decoding fails, it returns
+an empty byte slice and logs the error.
+*/
 func HexToBase64(in string) []byte {
 	rawBytes, err := hex.DecodeString(in)
 
@@ -80,6 +116,13 @@ func HexToBase64(in string) []byte {
 	return buf
 }
 
+/*
+CSUUID is a package-level function that converts a UUID string to a MongoDB
+
+Binary type using a specific reordering pattern. It removes any curly braces
+and hyphens from the UUID, then reorders the bytes according to the required
+format before converting to base64 and creating a Binary value.
+*/
 func CSUUID(uuid string) (primitive.Binary, error) {
 	cleanUUID := strings.NewReplacer("{", "", "}", "", "-", "").Replace(uuid)
 
