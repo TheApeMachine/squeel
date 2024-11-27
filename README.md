@@ -1,3 +1,5 @@
+[![Tests](https://github.com/johndoe/awesome-project/actions/workflows/tests.yml/badge.svg)](https://github.com/johndoe/awesome-project/actions/workflows/tests.yml)
+
 # Squeel 🔄
 
 Squeel is a powerful SQL-to-MongoDB query translator that enables you to write MongoDB queries using familiar SQL syntax. It bridges the gap between SQL and MongoDB's query language, making it easier for developers familiar with SQL to work with MongoDB.
