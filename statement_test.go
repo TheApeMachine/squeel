@@ -341,8 +341,568 @@ var stmts = []map[string]interface{}{{
 			"avg_sal":    bson.M{"$avg": refSalary},
 		}},
 	},
-}, // Add this comma
-} // Close the outer slice
+}, {
+	"sql":        "SELECT CASE WHEN age > 18 THEN 'adult' ELSE 'minor' END AS age_group FROM users",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"age_group": bson.M{
+				"$cond": bson.M{
+					"if":   bson.M{"$gt": []interface{}{"$age", 18}},
+					"then": "adult",
+					"else": "minor",
+				},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT name, CASE category WHEN 'electronics' THEN price * 0.9 WHEN 'books' THEN price * 0.95 ELSE price END AS discounted_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name": 1,
+			"discounted_price": bson.M{
+				"$cond": bson.M{
+					"if":   bson.M{"$eq": []interface{}{"$category", "electronics"}},
+					"then": bson.M{"$multiply": []interface{}{"$price", 0.9}},
+					"else": bson.M{
+						"$cond": bson.M{
+							"if":   bson.M{"$eq": []interface{}{"$category", "books"}},
+							"then": bson.M{"$multiply": []interface{}{"$price", 0.95}},
+							"else": "$price",
+						},
+					},
+				},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT user_id) as unique_users, AVG(amount) as avg_amount FROM orders WHERE status IN ('completed', 'shipped')",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoMatch: bson.M{
+			"status": bson.M{"$in": []string{"completed", "shipped"}},
+		}},
+		{mongoGroup: bson.M{
+			"_id":          nil,
+			"unique_users": bson.M{"$addToSet": "$user_id"},
+			"avg_amount":   bson.M{"$avg": "$amount"},
+		}},
+		{mongoProject: bson.M{
+			"unique_users": bson.M{"$size": "$unique_users"},
+			"avg_amount":   1,
+		}},
+	},
+}, {
+	"sql":        "SELECT name, description FROM products WHERE name LIKE '%phone%' OR description LIKE '%mobile%'",
+	"error":      nil,
+	"operation":  "find",
+	"collection": "products",
+	"projection": bson.D{
+		{Key: "name", Value: 1},
+		{Key: "description", Value: 1},
+	},
+	"filter": bson.D{{
+		Key: "$or",
+		Value: []bson.M{
+			{"name": bson.M{"$regex": ".*phone.*"}},
+			{"description": bson.M{"$regex": ".*mobile.*"}},
+		},
+	}},
+}, {
+	"sql":        "SELECT department, SUM(CASE WHEN status = 'active' THEN salary ELSE 0 END) as active_salary FROM employees GROUP BY department",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "employees",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id": "$department",
+			"active_salary": bson.M{
+				"$sum": bson.M{
+					"$cond": bson.M{
+						"if":   bson.M{"$eq": []interface{}{"$status", "active"}},
+						"then": "$salary",
+						"else": 0,
+					},
+				},
+			},
+			"department": bson.M{mongoFirst: "$department"},
+		}},
+	},
+}, {
+	"sql":        "SELECT name, (price > 100 AND stock > 0) as in_stock_expensive FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name": 1,
+			"in_stock_expensive": bson.M{
+				"$and": []bson.M{
+					{"$gt": []interface{}{"$price", 100}},
+					{"$gt": []interface{}{"$stock", 0}},
+				},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT * FROM orders WHERE created_at BETWEEN '2023-01-01' AND '2023-12-31' AND (status = 'pending' OR status = 'processing')",
+	"error":      nil,
+	"operation":  "find",
+	"collection": "orders",
+	"filter": bson.D{
+		{Key: "created_at", Value: bson.M{
+			"$gte": "2023-01-01",
+			"$lte": "2023-12-31",
+		}},
+		{Key: "$or", Value: []bson.M{
+			{"status": "pending"},
+			{"status": "processing"},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(*) as count, SUM(price) as total, AVG(price) as avg, MIN(price) as min, MAX(price) as max FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":   nil,
+			"count": bson.M{"$sum": 1},
+			"total": bson.M{"$sum": "$price"},
+			"avg":   bson.M{"$avg": "$price"},
+			"min":   bson.M{"$min": "$price"},
+			"max":   bson.M{"$max": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT user_id) as unique_users FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":          nil,
+			"unique_users": bson.M{"$addToSet": "$user_id"},
+		}},
+		{mongoProject: bson.M{
+			"unique_users": bson.M{"$size": "$unique_users"},
+		}},
+	},
+}, {
+	"sql":        "SELECT * FROM products WHERE price > 100 AND quantity <= 50 AND category != 'books' AND supplier IN ('A', 'B') AND status NOT IN ('discontinued')",
+	"error":      nil,
+	"operation":  "find",
+	"collection": "products",
+	"filter": bson.D{
+		{Key: "price", Value: bson.M{"$gt": 100}},
+		{Key: "quantity", Value: bson.M{"$lte": 50}},
+		{Key: "category", Value: bson.M{"$ne": "books"}},
+		{Key: "supplier", Value: bson.M{"$in": []string{"A", "B"}}},
+		{Key: "status", Value: bson.M{"$nin": []string{"discontinued"}}},
+	},
+}, {
+	"sql":        "SELECT COUNT(*) as total FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":   nil,
+			"total": bson.M{"$sum": 1},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT user_id) as unique_users FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":          nil,
+			"unique_users": bson.M{"$addToSet": "$user_id"},
+		}},
+		{mongoProject: bson.M{
+			"unique_users": bson.M{"$size": "$unique_users"},
+		}},
+	},
+}, {
+	"sql":        "SELECT SUM(price) as total_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":         nil,
+			"total_price": bson.M{"$sum": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT AVG(price) as avg_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":       nil,
+			"avg_price": bson.M{"$avg": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT MIN(price) as min_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":       nil,
+			"min_price": bson.M{"$min": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT MAX(price) as max_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":       nil,
+			"max_price": bson.M{"$max": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT department, COUNT(*) as emp_count, AVG(salary) as avg_salary, MIN(salary) as min_salary, MAX(salary) as max_salary FROM employees GROUP BY department",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "employees",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":        "$department",
+			"emp_count":  bson.M{"$sum": 1},
+			"avg_salary": bson.M{"$avg": "$salary"},
+			"min_salary": bson.M{"$min": "$salary"},
+			"max_salary": bson.M{"$max": "$salary"},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT status) as unique_statuses, COUNT(*) as total_orders FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":             nil,
+			"unique_statuses": bson.M{"$addToSet": "$status"},
+			"total_orders":    bson.M{"$sum": 1},
+		}},
+		{mongoProject: bson.M{
+			"unique_statuses": bson.M{"$size": "$unique_statuses"},
+			"total_orders":    1,
+		}},
+	},
+}, {
+	"sql":        "SELECT UNKNOWN_FUNC(user_id) as bad_func FROM users",
+	"error":      fmt.Errorf("unhandled function: UNKNOWN_FUNC"),
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline":   []bson.M{},
+}, {
+	"sql":        "SELECT COUNT(*) as total, SUM(price) as total_price, AVG(price) as avg_price, MIN(price) as min_price, MAX(price) as max_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":         nil,
+			"total":       bson.M{"$sum": 1},
+			"total_price": bson.M{"$sum": "$price"},
+			"avg_price":   bson.M{"$avg": "$price"},
+			"min_price":   bson.M{"$min": "$price"},
+			"max_price":   bson.M{"$max": "$price"},
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT status) as unique_statuses, COUNT(*) as total FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":             nil,
+			"unique_statuses": bson.M{"$addToSet": "$status"},
+			"total":           bson.M{"$sum": 1},
+		}},
+		{mongoProject: bson.M{
+			"unique_statuses": bson.M{"$size": "$unique_statuses"},
+			"total":           1,
+		}},
+	},
+}, {
+	"sql":        "SELECT UNKNOWN_FUNC(field) as bad_func FROM users",
+	"error":      fmt.Errorf("unhandled function: UNKNOWN_FUNC"),
+	"operation":  "aggregate",
+	"collection": "users",
+}, {
+	"sql":        "SELECT COUNT(DISTINCT status) as unique_statuses, COUNT(*) as total_orders FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":             nil,
+			"unique_statuses": bson.M{"$addToSet": "$status"},
+			"total_orders":    bson.M{"$sum": 1},
+		}},
+		{mongoProject: bson.M{
+			"unique_statuses": bson.M{"$size": "$unique_statuses"},
+			"total_orders":    1,
+		}},
+	},
+}, {
+	"sql":        "SELECT COUNT(DISTINCT user_id) as unique_users, COUNT(DISTINCT status) as unique_statuses FROM orders",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":             nil,
+			"unique_users":    bson.M{"$addToSet": "$user_id"},
+			"unique_statuses": bson.M{"$addToSet": "$status"},
+		}},
+		{mongoProject: bson.M{
+			"unique_users":    bson.M{"$size": "$unique_users"},
+			"unique_statuses": bson.M{"$size": "$unique_statuses"},
+		}},
+	},
+}, {
+	"sql":        "SELECT DATE_FORMAT(created_at, '%Y-%m-%d') as date, COUNT(*) as count FROM orders GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "orders",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id": bson.M{"$dateToString": bson.M{
+				"format": "%Y-%m-%d",
+				"date":   "$created_at",
+			}},
+			"count": bson.M{"$sum": 1},
+		}},
+		{mongoProject: bson.M{
+			"date":  "$_id",
+			"count": 1,
+			"_id":   0,
+		}},
+	},
+}, {
+	"sql":        "SELECT CONCAT(first_name, ' ', last_name) as full_name, UPPER(email) as email_upper FROM users WHERE LOWER(status) = 'active'",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoMatch: bson.M{
+			"status": bson.M{"$regex": "^active$", "$options": "i"},
+		}},
+		{mongoProject: bson.M{
+			"full_name":   bson.M{"$concat": []interface{}{"$first_name", " ", "$last_name"}},
+			"email_upper": bson.M{"$toUpper": "$email"},
+		}},
+	},
+}, {
+	"sql":        "SELECT category, AVG(price) as avg_price, (SELECT AVG(price) FROM products) as overall_avg FROM products GROUP BY category",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":       "$category",
+			"avg_price": bson.M{"$avg": "$price"},
+		}},
+		{mongoLookup: bson.M{
+			"from":     "products",
+			"pipeline": []bson.M{{mongoGroup: bson.M{"_id": nil, "overall_avg": bson.M{"$avg": "$price"}}}},
+			"as":       "overall",
+		}},
+		{"$unwind": "$overall"},
+		{mongoProject: bson.M{
+			"category":    "$_id",
+			"avg_price":   1,
+			"overall_avg": "$overall.overall_avg",
+			"_id":         0,
+		}},
+	},
+}, {
+	"sql":        "SELECT name, price, AVG(price) OVER (PARTITION BY category) as category_avg FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id":          "$category",
+			"category_avg": bson.M{"$avg": "$price"},
+			"products": bson.M{"$push": bson.M{
+				"name":  "$name",
+				"price": "$price",
+			}},
+		}},
+		{"$unwind": "$products"},
+		{mongoProject: bson.M{
+			"name":         "$products.name",
+			"price":        "$products.price",
+			"category_avg": 1,
+		}},
+	},
+}, {
+	"sql":        "SELECT u.name, d.name as dept_name FROM users u JOIN departments d ON u.dept_id = d.id",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoLookup: bson.M{
+			"from":         "departments",
+			"localField":   "dept_id",
+			"foreignField": "id",
+			"as":           "department",
+		}},
+		{"$unwind": "$department"},
+		{mongoProject: bson.M{
+			"name":      "$name",
+			"dept_name": "$department.name",
+		}},
+	},
+}, {
+	"sql":        "SELECT u.name, d.name as dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.id",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoLookup: bson.M{
+			"from":         "departments",
+			"localField":   "dept_id",
+			"foreignField": "id",
+			"as":           "department",
+		}},
+		{"$unwind": bson.M{
+			"path":                       "$department",
+			"preserveNullAndEmptyArrays": true,
+		}},
+		{mongoProject: bson.M{
+			"name":       "$name",
+			"dept_name":  "$department.name",
+			"department": "$department",
+		}},
+	},
+}, {
+	"sql":        "SELECT name, COALESCE(description, 'No description available') as description_text, IFNULL(price, 0) as final_price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name": 1,
+			"description_text": bson.M{
+				"$ifNull": []interface{}{"$description", "No description available"},
+			},
+			"final_price": bson.M{
+				"$ifNull": []interface{}{"$price", 0},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT SUBSTRING(name, 1, 3) as name_prefix, LENGTH(description) as desc_length FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name_prefix": bson.M{"$substr": []interface{}{"$name", 0, 3}},
+			"desc_length": bson.M{"$strLenCP": "$description"},
+		}},
+	},
+}, {
+	"sql":        "SELECT * FROM products WHERE name REGEXP 'phone|smartphone' OR description REGEXP 'mobile|wireless'",
+	"error":      nil,
+	"operation":  "find",
+	"collection": "products",
+	"filter": bson.D{
+		{Key: "$or", Value: []bson.M{
+			{"name": bson.M{"$regex": "phone|smartphone"}},
+			{"description": bson.M{"$regex": "mobile|wireless"}},
+		}},
+	},
+}, {
+	"sql":        "SELECT department, GROUP_CONCAT(DISTINCT name ORDER BY salary DESC) as employees FROM employees GROUP BY department",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "employees",
+	"pipeline": []bson.M{
+		{mongoGroup: bson.M{
+			"_id": "$department",
+			"names": bson.M{
+				"$addToSet": "$name",
+			},
+		}},
+		{"$sort": bson.M{"salary": -1}},
+		{mongoProject: bson.M{
+			"department": "$_id",
+			"employees": bson.M{
+				"$reduce": bson.M{
+					"input":        "$names",
+					"initialValue": "",
+					"in": bson.M{
+						"$concat": []interface{}{
+							"$$value",
+							bson.M{"$cond": []interface{}{
+								bson.M{"$eq": []interface{}{"$$value", ""}},
+								"",
+								",",
+							}},
+							"$$this",
+						},
+					},
+				},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT name, COALESCE(description, 'No description available') as desc, IFNULL(price, 0) as price FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name": 1,
+			"desc": bson.M{
+				"$ifNull": []interface{}{"$description", "No description available"},
+			},
+			"price": bson.M{
+				"$ifNull": []interface{}{"$price", 0},
+			},
+		}},
+	},
+}, {
+	"sql":        "SELECT SUBSTRING(name, 1, 3) as name_prefix, LENGTH(description) as desc_length, LOCATE('sale', LOWER(description)) as has_sale FROM products",
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "products",
+	"pipeline": []bson.M{
+		{mongoProject: bson.M{
+			"name_prefix": bson.M{"$substr": []interface{}{"$name", 0, 3}},
+			"desc_length": bson.M{"$strLenCP": "$description"},
+			"has_sale": bson.M{
+				"$indexOfCP": []interface{}{
+					bson.M{"$toLower": "$description"},
+					"sale",
+				},
+			},
+		}},
+	},
+}}
 
 func TestSqueel(t *testing.T) {
 	Convey("Given a Squeel statement", t, func() {
