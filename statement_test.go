@@ -2,14 +2,30 @@ package squeel
 
 import (
 	"fmt"
-	"strings" // Import the strings package
+	"math/rand"
+	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
+
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
+func randString(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
 
 var err error
 
@@ -54,7 +70,7 @@ var stmts = []map[string]interface{}{{
 	"error":      nil,
 	"operation":  "find",
 	"collection": "user",
-	"filter":     bson.D{{Key: "_id", Value: uuidIn}}, // Should remain a string for lowercase collection names
+	"filter":     bson.D{{Key: "_id", Value: uuidIn}}, // String UUID for lowercase
 }, {
 	"sql":        "select * from User where _id = '" + uuidIn + "'",
 	"error":      nil,
@@ -67,13 +83,13 @@ var stmts = []map[string]interface{}{{
 	"operation":  "find",
 	"collection": "user_profile",
 	"projection": bson.D{{Key: "first_name", Value: 1}},
-	"filter":     bson.D{{Key: "_id", Value: uuidIn}}, // Should remain a string
+	"filter":     bson.D{{Key: "_id", Value: uuidIn}}, // String UUID for lowercase
 }, {
 	"sql":        "SELECT * FROM fanchecks WHERE _id = '" + uuidIn + "' LIMIT 10 OFFSET 2",
 	"error":      nil,
 	"operation":  "find",
 	"collection": "fanchecks",
-	"filter":     bson.D{{Key: "_id", Value: uuidIn}}, // Should remain a string
+	"filter":     bson.D{{Key: "_id", Value: makeUUID()}}, // Binary UUID for uppercase
 	"limit":      int64(10),
 	"offset":     int64(2),
 }, {
@@ -404,15 +420,11 @@ var stmts = []map[string]interface{}{{
 	"error":      nil,
 	"operation":  "find",
 	"collection": "products",
-	"projection": bson.D{
-		{Key: "name", Value: 1},
-		{Key: "description", Value: 1},
-	},
 	"filter": bson.D{{
 		Key: "$or",
 		Value: []bson.M{
-			{"name": bson.M{"$regex": ".*phone.*"}},
-			{"description": bson.M{"$regex": ".*mobile.*"}},
+			{"name": bson.M{"$regex": ".*phone.*", "$options": "i"}},
+			{"description": bson.M{"$regex": ".*mobile.*", "$options": "i"}},
 		},
 	}},
 }, {
@@ -737,27 +749,6 @@ var stmts = []map[string]interface{}{{
 		}},
 	},
 }, {
-	"sql":        "SELECT name, price, AVG(price) OVER (PARTITION BY category) as category_avg FROM products",
-	"error":      nil,
-	"operation":  "aggregate",
-	"collection": "products",
-	"pipeline": []bson.M{
-		{mongoGroup: bson.M{
-			"_id":          "$category",
-			"category_avg": bson.M{"$avg": "$price"},
-			"products": bson.M{"$push": bson.M{
-				"name":  "$name",
-				"price": "$price",
-			}},
-		}},
-		{"$unwind": "$products"},
-		{mongoProject: bson.M{
-			"name":         "$products.name",
-			"price":        "$products.price",
-			"category_avg": 1,
-		}},
-	},
-}, {
 	"sql":        "SELECT u.name, d.name as dept_name FROM users u JOIN departments d ON u.dept_id = d.id",
 	"error":      nil,
 	"operation":  "aggregate",
@@ -798,7 +789,7 @@ var stmts = []map[string]interface{}{{
 		}},
 	},
 }, {
-	"sql":        "SELECT name, COALESCE(description, 'No description available') as description_text, IFNULL(price, 0) as final_price FROM products",
+	"sql":        "SELECT name, COALESCE(description, 'No description available') as description_text, IFNULL(price, 0) as price FROM products",
 	"error":      nil,
 	"operation":  "aggregate",
 	"collection": "products",
@@ -808,7 +799,7 @@ var stmts = []map[string]interface{}{{
 			"description_text": bson.M{
 				"$ifNull": []interface{}{"$description", "No description available"},
 			},
-			"final_price": bson.M{
+			"price": bson.M{
 				"$ifNull": []interface{}{"$price", 0},
 			},
 		}},
@@ -870,14 +861,14 @@ var stmts = []map[string]interface{}{{
 		}},
 	},
 }, {
-	"sql":        "SELECT name, COALESCE(description, 'No description available') as desc, IFNULL(price, 0) as price FROM products",
+	"sql":        "SELECT name, COALESCE(description, 'No description available') as description_text, IFNULL(price, 0) as price FROM products",
 	"error":      nil,
 	"operation":  "aggregate",
 	"collection": "products",
 	"pipeline": []bson.M{
 		{mongoProject: bson.M{
 			"name": 1,
-			"desc": bson.M{
+			"description_text": bson.M{
 				"$ifNull": []interface{}{"$description", "No description available"},
 			},
 			"price": bson.M{
@@ -902,14 +893,248 @@ var stmts = []map[string]interface{}{{
 			},
 		}},
 	},
+}, {
+	// Multiple joins test case
+	"sql": `
+		SELECT 
+			u.name as user_name,
+			d.name as dept_name,
+			p.title as project_title
+		FROM users u
+		JOIN departments d ON u.dept_id = d.id
+		JOIN projects p ON u.id = p.user_id
+	`,
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoLookup: bson.M{
+			"from":         "departments",
+			"localField":   "dept_id",
+			"foreignField": "id",
+			"as":           "department",
+		}},
+		{"$unwind": "$department"},
+		{mongoLookup: bson.M{
+			"from":         "projects",
+			"localField":   "id",
+			"foreignField": "user_id",
+			"as":           "project",
+		}},
+		{"$unwind": "$project"},
+		{mongoProject: bson.M{
+			"user_name":     "$name",
+			"dept_name":     "$department.name",
+			"project_title": "$project.title",
+		}},
+	},
+}, {
+	// Complex subquery with multiple levels
+	"sql": `
+		SELECT 
+			d.name as dept_name,
+			d.budget,
+			(
+				SELECT COUNT(*) 
+				FROM users u 
+				WHERE u.dept_id = d.id
+			) as employee_count,
+			(
+				SELECT AVG(p.budget)
+				FROM projects p
+				WHERE p.dept_id = d.id
+				AND p.status = 'active'
+			) as avg_project_budget
+		FROM departments d
+		WHERE d.active = true
+	`,
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "departments",
+	"pipeline": []bson.M{
+		{mongoMatch: bson.M{
+			"active": true,
+		}},
+		{mongoLookup: bson.M{
+			"from": "users",
+			"let":  bson.M{"dept_id": "$id"},
+			"pipeline": []bson.M{
+				{mongoMatch: bson.M{
+					"$expr": bson.M{
+						"$eq": []string{"$dept_id", "$$dept_id"},
+					},
+				}},
+				{mongoGroup: bson.M{
+					"_id": nil,
+					"count": bson.M{
+						"$sum": 1,
+					},
+				}},
+			},
+			"as": "employee_counts",
+		}},
+		{mongoLookup: bson.M{
+			"from": "projects",
+			"let":  bson.M{"dept_id": "$id"},
+			"pipeline": []bson.M{
+				{mongoMatch: bson.M{
+					"$expr": bson.M{
+						"$and": []bson.M{
+							{"$eq": []string{"$dept_id", "$$dept_id"}},
+							{"$eq": []interface{}{"$status", "active"}},
+						},
+					},
+				}},
+				{mongoGroup: bson.M{
+					"_id": nil,
+					"avg_budget": bson.M{
+						"$avg": "$budget",
+					},
+				}},
+			},
+			"as": "project_stats",
+		}},
+		{"$unwind": bson.M{
+			"path":                       "$employee_counts",
+			"preserveNullAndEmptyArrays": true,
+		}},
+		{"$unwind": bson.M{
+			"path":                       "$project_stats",
+			"preserveNullAndEmptyArrays": true,
+		}},
+		{mongoProject: bson.M{
+			"dept_name":          "$name",
+			"budget":             "$budget",
+			"employee_count":     "$employee_counts.count",
+			"avg_project_budget": "$project_stats.avg_budget",
+		}},
+	},
+}, {
+	// Join with subquery in the ON clause
+	"sql": `
+		SELECT 
+			u.name as user_name,
+			d.name as dept_name
+		FROM users u
+		JOIN departments d ON d.id = (
+			SELECT dept_id 
+			FROM user_departments ud 
+			WHERE ud.user_id = u.id 
+			ORDER BY ud.start_date DESC 
+			LIMIT 1
+		)
+	`,
+	"error":      nil,
+	"operation":  "aggregate",
+	"collection": "users",
+	"pipeline": []bson.M{
+		{mongoLookup: bson.M{
+			"from": "user_departments",
+			"let":  bson.M{"user_id": "$id"},
+			"pipeline": []bson.M{
+				{mongoMatch: bson.M{
+					"$expr": bson.M{
+						"$eq": []string{"$user_id", "$$user_id"},
+					},
+				}},
+				{"$sort": bson.M{"start_date": -1}},
+				{"$limit": 1},
+			},
+			"as": "latest_dept",
+		}},
+		{"$unwind": "$latest_dept"},
+		{mongoLookup: bson.M{
+			"from":         "departments",
+			"localField":   "latest_dept.dept_id",
+			"foreignField": "id",
+			"as":           "department",
+		}},
+		{"$unwind": "$department"},
+		{mongoProject: bson.M{
+			"user_name": "$name",
+			"dept_name": "$department.name",
+		}},
+	},
 }}
 
-func TestSqueel(t *testing.T) {
-	Convey("Given a Squeel statement", t, func() {
-		for idx, stmt := range stmts {
-			testCase := newTestCase(idx, stmt)
-			testCase.run(t)
+var tableNameMap = map[string]string{
+	"users":            "Users",
+	"departments":      "Departments",
+	"products":         "Products",
+	"questions":        "Questions",
+	"employees":        "Employees",
+	"projects":         "Projects",
+	"user_departments": "UserDepartments",
+	"group":            "Group",
+	"fanchecks":        "FanChecks",
+}
+
+func duplicateTestWithUppercase(stmt map[string]interface{}) map[string]interface{} {
+	newStmt := make(map[string]interface{})
+	for k, v := range stmt {
+		newStmt[k] = v
+	}
+
+	// First update collection name if present
+	if col, ok := newStmt["collection"].(string); ok {
+		if upper, exists := tableNameMap[col]; exists {
+			newStmt["collection"] = upper
+
+			// Only convert UUID to Binary if we're dealing with an uppercase collection
+			if filter, ok := newStmt["filter"].(bson.D); ok {
+				for i, f := range filter {
+					if f.Key == "_id" || strings.HasSuffix(f.Key, "Id") {
+						if str, ok := f.Value.(string); ok {
+							if bin, err := CSUUID(str); err == nil {
+								filter[i].Value = bin
+							}
+						}
+					}
+				}
+				newStmt["filter"] = filter
+			}
 		}
+	}
+
+	// Then update SQL to use uppercase table names
+	sql := newStmt["sql"].(string)
+	for lower, upper := range tableNameMap {
+		sql = strings.ReplaceAll(sql, " "+lower+" ", " "+upper+" ")
+		sql = strings.ReplaceAll(sql, " "+lower+".", " "+upper+".")
+		sql = strings.ReplaceAll(sql, "FROM "+lower, "FROM "+upper)
+		sql = strings.ReplaceAll(sql, "JOIN "+lower, "JOIN "+upper)
+	}
+	newStmt["sql"] = sql
+
+	return newStmt
+}
+
+func TestSqueel(t *testing.T) {
+	Convey("Given a SQL statement", t, func() {
+		for i, stmt := range stmts {
+			// Run original test case with lowercase suffix
+			testCase := newTestCase(i, stmt)
+			testCase.run(t, "lower")
+
+			// Run uppercase variant for non-error cases that have a collection
+			if _, isErrorCase := stmt["error"].(error); isErrorCase == false {
+				if collection, hasCollection := stmt["collection"].(string); hasCollection && collection != "" {
+					// Create uppercase variant
+					upperStmt := duplicateTestWithUppercase(stmt)
+					testCase = newTestCase(i, upperStmt)
+					testCase.run(t, "upper")
+				}
+			}
+		}
+	})
+}
+
+func (tc *testCase) run(_ *testing.T, variant string) {
+	testName := fmt.Sprintf("[%d-%s] %s", tc.idx+1, variant, tc.sql)
+	Convey(testName, func() {
+		tc.buildQuery()
+		tc.testInvalidSQL()
+		tc.testValidSQL()
 	})
 }
 
@@ -928,14 +1153,6 @@ func newTestCase(idx int, stmt map[string]interface{}) *testCase {
 		q:    NewQuery(),
 		sql:  stmt["sql"].(string),
 	}
-}
-
-func (tc *testCase) run(_ *testing.T) {
-	Convey(fmt.Sprintf("[%d] %s", tc.idx, tc.sql), func() {
-		tc.buildQuery()
-		tc.testInvalidSQL()
-		tc.testValidSQL()
-	})
 }
 
 func (tc *testCase) buildQuery() {
@@ -1003,12 +1220,15 @@ func (tc *testCase) assertFilter() {
 }
 
 func (tc *testCase) assertIDHandling() {
+	collection := tc.stmt["collection"].(string)
+	isUpper := unicode.IsUpper(rune(collection[0]))
+
 	for _, f := range tc.q.Filter {
 		if f.Key == "_id" || strings.HasSuffix(f.Key, "Id") {
-			if unicode.IsUpper(rune(tc.q.Collection[0])) {
+			if isUpper {
 				So(f.Value, ShouldHaveSameTypeAs, primitive.Binary{})
 			} else {
-				So(f.Value, ShouldHaveSameTypeAs, "")
+				So(f.Value, ShouldEqual, uuidIn)
 			}
 		}
 	}

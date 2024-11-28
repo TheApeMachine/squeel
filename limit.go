@@ -44,7 +44,7 @@ func (statement *Statement) parseLimit(q *Query, node *sqlparser.Limit) *Query {
 		}
 	}
 
-	if *q.Limit == 1 {
+	if *q.Limit == 1 && q.Operation != "aggregate" {
 		q.Operation = "findone"
 	}
 

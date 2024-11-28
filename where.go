@@ -65,19 +65,6 @@ func (statement *Statement) parseWhereExpr(q *Query, expr sqlparser.Expr) *Query
 		q = statement.parseWhereExpr(q, expr.Left)
 		q = statement.parseWhereExpr(q, expr.Right)
 	case *sqlparser.OrExpr:
-		if isLikeOrCondition(expr) {
-			leftPattern := getLikePattern(expr.Left.(*sqlparser.ComparisonExpr))
-			rightPattern := getLikePattern(expr.Right.(*sqlparser.ComparisonExpr))
-			q.Filter = append(q.Filter, bson.E{
-				Key: "$or",
-				Value: []bson.M{
-					{"name": bson.M{"$regex": leftPattern}},
-					{"description": bson.M{"$regex": rightPattern}},
-				},
-			})
-			return q
-		}
-
 		leftQ := statement.parseWhereExpr(NewQuery(), expr.Left)
 		rightQ := statement.parseWhereExpr(NewQuery(), expr.Right)
 		q.Filter = append(q.Filter, bson.E{
@@ -246,6 +233,17 @@ func (statement *Statement) handleColumnComparison(q *Query, col *sqlparser.ColN
 			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
 				"$regex":   pattern,
 				"$options": "i",
+			}})
+			return q
+		}
+	}
+
+	// Special handling for REGEXP operator
+	if expr.Operator == "regexp" {
+		if sqlVal, ok := expr.Right.(*sqlparser.SQLVal); ok {
+			pattern := string(sqlVal.Val)
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+				"$regex": pattern,
 			}})
 			return q
 		}
@@ -560,4 +558,21 @@ func getLikePattern(expr *sqlparser.ComparisonExpr) string {
 		return strings.ReplaceAll(string(sqlVal.Val), "%", ".*")
 	}
 	return ""
+}
+
+/*
+isRegexpOrCondition checks if an OR expression consists of two REGEXP conditions.
+This is used to optimize the common pattern of searching across multiple fields
+with the same regular expression.
+
+Parameters:
+- expr: The OR expression to check
+
+Returns:
+- true if both sides are REGEXP conditions, false otherwise
+*/
+func isRegexpOrCondition(expr *sqlparser.OrExpr) bool {
+	left, ok1 := expr.Left.(*sqlparser.ComparisonExpr)
+	right, ok2 := expr.Right.(*sqlparser.ComparisonExpr)
+	return ok1 && ok2 && left.Operator == "regexp" && right.Operator == "regexp"
 }
