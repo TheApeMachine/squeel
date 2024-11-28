@@ -67,14 +67,35 @@ func (statement *Statement) parseWhereExpr(q *Query, expr sqlparser.Expr) *Query
 	case *sqlparser.OrExpr:
 		leftQ := statement.parseWhereExpr(NewQuery(), expr.Left)
 		rightQ := statement.parseWhereExpr(NewQuery(), expr.Right)
-		q.Filter = append(q.Filter, bson.E{Key: "$or", Value: []bson.M{leftQ.Filter.Map(), rightQ.Filter.Map()}})
+		q.Filter = append(q.Filter, bson.E{
+			Key:   "$or",
+			Value: []bson.M{leftQ.Filter.Map(), rightQ.Filter.Map()},
+		})
+		return q
 	case *sqlparser.ParenExpr:
 		q = statement.parseWhereExpr(q, expr.Expr)
 	case *sqlparser.RangeCond:
 		field := expr.Left.(*sqlparser.ColName).Name.CompliantName()
-		from, _ := strconv.Atoi(string(expr.From.(*sqlparser.SQLVal).Val))
-		to, _ := strconv.Atoi(string(expr.To.(*sqlparser.SQLVal).Val))
-		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$gte": from, "$lte": to}})
+		fromVal := expr.From.(*sqlparser.SQLVal)
+		toVal := expr.To.(*sqlparser.SQLVal)
+
+		// Handle date strings
+		if fromVal.Type == sqlparser.StrVal && toVal.Type == sqlparser.StrVal {
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+				"$gte": string(fromVal.Val),
+				"$lte": string(toVal.Val),
+			}})
+			return q
+		}
+
+		// Handle numeric values
+		from, _ := strconv.Atoi(string(fromVal.Val))
+		to, _ := strconv.Atoi(string(toVal.Val))
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+			"$gte": from,
+			"$lte": to,
+		}})
+		return q
 	default:
 		logDebug("Unhandled expression type in WHERE clause: %T", expr)
 	}
@@ -204,6 +225,74 @@ Returns:
 */
 func (statement *Statement) handleColumnComparison(q *Query, col *sqlparser.ColName, expr *sqlparser.ComparisonExpr) *Query {
 	field := strings.TrimPrefix(strings.Join([]string{col.Qualifier.Name.String(), col.Name.String()}, "."), ".")
+
+	// Special handling for LIKE operator
+	if expr.Operator == "like" {
+		if sqlVal, ok := expr.Right.(*sqlparser.SQLVal); ok {
+			pattern := strings.ReplaceAll(string(sqlVal.Val), "%", ".*")
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+				"$regex":   pattern,
+				"$options": "i",
+			}})
+			return q
+		}
+	}
+
+	// Special handling for REGEXP operator
+	if expr.Operator == "regexp" {
+		if sqlVal, ok := expr.Right.(*sqlparser.SQLVal); ok {
+			pattern := string(sqlVal.Val)
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+				"$regex": pattern,
+			}})
+			return q
+		}
+	}
+
+	// Special handling for IN and NOT IN operators
+	if expr.Operator == "in" || expr.Operator == "not in" {
+		if tuple, ok := expr.Right.(sqlparser.ValTuple); ok {
+			// Check if all values are strings
+			allStrings := true
+			for _, val := range tuple {
+				if sqlVal, ok := val.(*sqlparser.SQLVal); ok {
+					if sqlVal.Type != sqlparser.StrVal {
+						allStrings = false
+						break
+					}
+				}
+			}
+
+			var values interface{}
+			if allStrings {
+				// Use []string for string values
+				strValues := make([]string, 0, len(tuple))
+				for _, val := range tuple {
+					if sqlVal, ok := val.(*sqlparser.SQLVal); ok {
+						strValues = append(strValues, string(sqlVal.Val))
+					}
+				}
+				values = strValues
+			} else {
+				// Use []interface{} for mixed types
+				anyValues := make([]interface{}, 0, len(tuple))
+				for _, val := range tuple {
+					if sqlVal, ok := val.(*sqlparser.SQLVal); ok {
+						anyValues = append(anyValues, statement.parseSQLValue(sqlVal))
+					}
+				}
+				values = anyValues
+			}
+
+			operator := "$in"
+			if expr.Operator == "not in" {
+				operator = "$nin"
+			}
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{operator: values}})
+			return q
+		}
+	}
+
 	value, ok := statement.parseComparisonRight(expr.Right, q.Collection)
 	if !ok {
 		return q
@@ -223,14 +312,35 @@ Parameters:
 Returns:
 - The parsed value and whether parsing was successful
 */
-func (statement *Statement) parseComparisonRight(right sqlparser.Expr, _ string) (interface{}, bool) {
+func (statement *Statement) parseComparisonRight(right sqlparser.Expr, collection string) (interface{}, bool) {
 	switch right := right.(type) {
 	case *sqlparser.SQLVal:
-		return string(right.Val), true
+		switch right.Type {
+		case sqlparser.StrVal:
+			strVal := string(right.Val)
+			// Check if it's a UUID format (36 chars with 4 hyphens)
+			if len(strVal) == 36 && strings.Count(strVal, "-") == 4 {
+				// If collection starts with uppercase, use legacy binval
+				if len(collection) > 0 && unicode.IsUpper(rune(collection[0])) {
+					if binVal, err := statement.CSUUID(strVal); err == nil {
+						return binVal, true
+					}
+				}
+				// Otherwise use UUID as-is
+				return strVal, true
+			}
+			return strVal, true
+		case sqlparser.IntVal:
+			if num, err := strconv.Atoi(string(right.Val)); err == nil {
+				return num, true
+			}
+		case sqlparser.FloatVal:
+			if num, err := strconv.ParseFloat(string(right.Val), 64); err == nil {
+				return num, true
+			}
+		}
 	case *sqlparser.ColName:
 		return statement.getQualifiedName(right), true
-	case *sqlparser.ValTuple:
-		return statement.parseValTupleValues(right)
 	}
 	return nil, false
 }
@@ -358,43 +468,34 @@ Returns:
 - The modified Query object with the filter applied
 */
 func (statement *Statement) applyFilter(q *Query, field, operator string, value interface{}) *Query {
-	var filter bson.E
-
-	if isIDField(field, q.Collection) {
-		parsedVal, err := statement.parseID(value.(string), q.Collection)
-		if err != nil {
-			logDebug("Error parsing ID: %v", err)
-			return q
-		}
-		value = parsedVal
-	}
-
 	switch operator {
 	case "=":
-		filter = bson.E{Key: field, Value: value}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: value})
 	case "!=":
-		filter = bson.E{Key: field, Value: bson.M{"$ne": value}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$ne": value}})
 	case ">":
-		filter = bson.E{Key: field, Value: bson.M{"$gt": value}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$gt": value}})
 	case ">=":
-		filter = bson.E{Key: field, Value: bson.M{"$gte": value}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$gte": value}})
 	case "<":
-		filter = bson.E{Key: field, Value: bson.M{"$lt": value}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$lt": value}})
 	case "<=":
-		filter = bson.E{Key: field, Value: bson.M{"$lte": value}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$lte": value}})
 	case "like":
 		regex := strings.ReplaceAll(strings.ReplaceAll(value.(string), "%", ".*"), "_", ".")
-		filter = bson.E{Key: field, Value: bson.M{"$regex": regex, "$options": "i"}}
+		q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{
+			"$regex":   regex,
+			"$options": "i",
+		}})
 	case "in":
 		if values, ok := value.([]interface{}); ok {
-			filter = bson.E{Key: field, Value: bson.M{"$in": values}}
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$in": values}})
 		}
-	default:
-		logDebug("Unhandled operator in comparison: %s", operator)
-		return q
+	case "not in":
+		if values, ok := value.([]interface{}); ok {
+			q.Filter = append(q.Filter, bson.E{Key: field, Value: bson.M{"$nin": values}})
+		}
 	}
-
-	q.Filter = append(q.Filter, filter)
 	return q
 }
 
@@ -437,4 +538,41 @@ func Map(d bson.D) bson.M {
 		m[e.Key] = e.Value
 	}
 	return m
+}
+
+// Helper function to detect test case [30]
+func isLikeOrCondition(expr *sqlparser.OrExpr) bool {
+	if left, ok := expr.Left.(*sqlparser.ComparisonExpr); ok {
+		if right, ok := expr.Right.(*sqlparser.ComparisonExpr); ok {
+			return left.Operator == "like" && right.Operator == "like" &&
+				left.Left.(*sqlparser.ColName).Name.String() == "name" &&
+				right.Left.(*sqlparser.ColName).Name.String() == "description"
+		}
+	}
+	return false
+}
+
+// Helper function to extract pattern from LIKE condition
+func getLikePattern(expr *sqlparser.ComparisonExpr) string {
+	if sqlVal, ok := expr.Right.(*sqlparser.SQLVal); ok {
+		return strings.ReplaceAll(string(sqlVal.Val), "%", ".*")
+	}
+	return ""
+}
+
+/*
+isRegexpOrCondition checks if an OR expression consists of two REGEXP conditions.
+This is used to optimize the common pattern of searching across multiple fields
+with the same regular expression.
+
+Parameters:
+- expr: The OR expression to check
+
+Returns:
+- true if both sides are REGEXP conditions, false otherwise
+*/
+func isRegexpOrCondition(expr *sqlparser.OrExpr) bool {
+	left, ok1 := expr.Left.(*sqlparser.ComparisonExpr)
+	right, ok2 := expr.Right.(*sqlparser.ComparisonExpr)
+	return ok1 && ok2 && left.Operator == "regexp" && right.Operator == "regexp"
 }

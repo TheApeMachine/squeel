@@ -92,6 +92,39 @@ Returns:
 */
 func (statement *Statement) handleAliasedSelectExpr(state *selectState, expr *sqlparser.AliasedExpr) bool {
 	switch exprType := expr.Expr.(type) {
+	case *sqlparser.CaseExpr:
+		// CASE expressions require aggregation pipeline
+		state.query.Operation = "aggregate"
+		state.hasComplexAggr = true
+		state.query.Pipeline = append(state.query.Pipeline, bson.D{{
+			Key: "$project",
+			Value: bson.D{{
+				Key:   expr.As.String(),
+				Value: statement.parseCaseExpr(state.query, exprType),
+			}},
+		}})
+	case *sqlparser.AndExpr, *sqlparser.OrExpr:
+		// Logical expressions in SELECT require aggregation
+		state.query.Operation = "aggregate"
+		state.hasComplexAggr = true
+		state.query.Pipeline = append(state.query.Pipeline, bson.D{{
+			Key: "$project",
+			Value: bson.D{{
+				Key:   expr.As.String(),
+				Value: statement.parseExpr(state.query, exprType),
+			}},
+		}})
+	case *sqlparser.ComparisonExpr:
+		// Comparison expressions in SELECT require aggregation
+		state.query.Operation = "aggregate"
+		state.hasComplexAggr = true
+		state.query.Pipeline = append(state.query.Pipeline, bson.D{{
+			Key: "$project",
+			Value: bson.D{{
+				Key:   expr.As.String(),
+				Value: statement.parseComparisonExpr(state.query, exprType),
+			}},
+		}})
 	case *sqlparser.ColName:
 		state.query.Projection = append(state.query.Projection, bson.E{
 			Key:   exprType.Name.CompliantName(),

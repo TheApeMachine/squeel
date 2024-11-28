@@ -1,0 +1,16 @@
+<very important>
+	We need to support C# Legacy Binary Values, BinVal type 3. This should always use the CSUUID method in binval.go, as it uses the correct byte order.
+    This should only be used when the collection name starts with an uppercase letter.
+</very important>
+
+<navigating the code>
+	For every major element of the SQL language, there is a corresponding file in the codebase.
+	Statements are in statement.go
+	Where clauses are in where.go
+	Join clauses are in join.go
+	Select expressions are in select.go
+	Function calls are in function.go
+    etc.
+
+    So be mindful of where you are in the codebase when you are making changes.
+</navigating the code>
