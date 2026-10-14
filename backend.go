@@ -60,6 +60,7 @@ var (
 	WithHTTPTimeout            = backend.WithHTTPTimeout
 	WithDownloader             = backend.WithDownloader
 	WithUploader               = backend.WithUploader
+	WithPrefetchConcurrency    = backend.WithPrefetchConcurrency
 )
 
 // Compile compiles a Statement using the provided typed backend adapter.

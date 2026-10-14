@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -15,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	errnie "github.com/theapemachine/errnie/v3"
 )
 
@@ -45,6 +50,7 @@ type S3Config struct {
 	DefaultPartitionKeys   []string            // Default partition keys for tables not in PartitionKeys
 	AutoDetectPartitions   bool                // If true, detects equality/IN conditions as partition keys when none configured
 	MaxDateRangePartitions int                 // Maximum days to enumerate for date range partition pruning (default 365)
+	PrefetchConcurrency    int                 // Concurrent prefetch downloads in Stream pipeline (default 16)
 
 	// Live Connection Configuration
 	Endpoint        string              // Optional custom S3 endpoint (e.g. MinIO, LocalStack)
@@ -112,6 +118,15 @@ func WithAutoDetectPartitions(auto bool) S3Option {
 func WithMaxDateRangePartitions(max int) S3Option {
 	return func(c *S3Config) {
 		c.MaxDateRangePartitions = max
+	}
+}
+
+// WithPrefetchConcurrency sets the concurrent prefetch download pipeline capacity in Stream.
+func WithPrefetchConcurrency(concurrency int) S3Option {
+	return func(c *S3Config) {
+		if concurrency > 0 {
+			c.PrefetchConcurrency = concurrency
+		}
 	}
 }
 
@@ -196,16 +211,21 @@ func (p FilterPredicate) String() string {
 // It specifies the exact S3 key prefixes that need to be downloaded, along with
 // projected columns and any residual filters that must be evaluated on the records.
 type S3Query struct {
-	Bucket        string            // S3 bucket name
-	Table         string            // Target table name
-	Prefixes      []string          // S3 key prefixes that must be listed and downloaded
-	Columns       []string          // Projected column names (empty if SELECT *)
-	IsStar        bool              // True if SELECT *
-	Predicates    []FilterPredicate // Residual filters to apply to downloaded data
-	Limit         *int64            // Limit, if specified
-	Offset        *int64            // Offset, if specified
-	Distinct      bool              // Whether SELECT DISTINCT
-	PartitionKeys []string          // Partition keys recognized for this table
+	Bucket              string              // S3 bucket name
+	Table               string              // Target table name
+	TableBase           string              // Base path for table in S3 (e.g. "symm/" or "data/symm/")
+	Prefixes            []string            // S3 key prefixes that must be listed and downloaded
+	Columns             []string            // Projected column names (empty if SELECT *)
+	IsStar              bool                // True if SELECT *
+	Predicates          []FilterPredicate   // Residual filters to apply to downloaded data
+	Limit               *int64              // Limit, if specified
+	Offset              *int64              // Offset, if specified
+	Distinct            bool                // Whether SELECT DISTINCT
+	PartitionKeys       []string            // Partition keys recognized for this table
+	PartitionStyle      PartitionStyle      // HivePartitioning or FlatPartitioning
+	KeyConstraints      map[string][]string // Equality/IN constraint values for any partition key in WHERE
+	OrderBy             []OrderItem         // OrderBy items from query
+	PrefetchConcurrency int                 // Sliding-window prefetch download concurrency (default 16)
 }
 
 // S3URIs returns full s3:// URI strings for each generated prefix.
@@ -260,7 +280,153 @@ type S3Object struct {
 	LastModified *time.Time
 }
 
-// Stream streams matching objects from S3 for this compiled query using AWS SDK v2 paginators and manager.Downloader.
+// extractSequenceID attempts to extract a trailing numeric sequence identifier from the base filename of an S3 key.
+// Handles formats like "1.bin", "10.bin", "part_0.bin", "part_123.bin", "p1.json", "e10.json".
+func extractSequenceID(key string) (int64, bool) {
+	base := path.Base(key)
+	ext := path.Ext(base)
+	nameWithoutExt := strings.TrimSuffix(base, ext)
+
+	var end = -1
+	var start = -1
+	for i := len(nameWithoutExt) - 1; i >= 0; i-- {
+		r := rune(nameWithoutExt[i])
+		if unicode.IsDigit(r) {
+			if end == -1 {
+				end = i + 1
+			}
+			start = i
+		} else if end != -1 {
+			break
+		}
+	}
+	if start != -1 && end != -1 {
+		if val, err := strconv.ParseInt(nameWithoutExt[start:end], 10, 64); err == nil {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+// matchesKeyConstraints verifies that a key matches partition constraints, especially for
+// hierarchy levels that came after a missing middle partition key in the WHERE clause.
+func (q *S3Query) matchesKeyConstraints(key string) bool {
+	if len(q.KeyConstraints) == 0 {
+		return true
+	}
+
+	relPath := key
+	if q.TableBase != "" && strings.HasPrefix(key, q.TableBase) {
+		relPath = strings.TrimPrefix(key, q.TableBase)
+	} else if strings.HasPrefix(key, q.Table+"/") {
+		relPath = strings.TrimPrefix(key, q.Table+"/")
+	}
+
+	parts := strings.Split(relPath, "/")
+	if len(parts) <= 1 {
+		return true
+	}
+
+	// Partition segments before the filename
+	segments := parts[:len(parts)-1]
+
+	if q.PartitionStyle == FlatPartitioning {
+		for idx, pk := range q.PartitionKeys {
+			allowedVals, hasConstraint := q.KeyConstraints[pk]
+			if !hasConstraint || len(allowedVals) == 0 {
+				continue
+			}
+			if idx >= len(segments) {
+				return false
+			}
+			segVal := segments[idx]
+			matched := false
+			for _, allowed := range allowedVals {
+				if segVal == allowed {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
+	}
+
+	// HivePartitioning: segments are key=value
+	segmentMap := make(map[string]string, len(segments))
+	for _, seg := range segments {
+		if k, v, found := strings.Cut(seg, "="); found {
+			segmentMap[k] = v
+		}
+	}
+
+	for pk, allowedVals := range q.KeyConstraints {
+		if len(allowedVals) == 0 {
+			continue
+		}
+		segVal, ok := segmentMap[pk]
+		if !ok {
+			return false
+		}
+		matched := false
+		for _, allowed := range allowedVals {
+			if segVal == allowed {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	return true
+}
+
+// sortObjects orders S3 objects by sequence number ascending (or descending if specified by ORDER BY),
+// using the full key as deterministic tie-breaker.
+func (q *S3Query) sortObjects(objects []types.Object) {
+	isDesc := false
+	if len(q.OrderBy) > 0 && q.OrderBy[0].Direction == Desc {
+		isDesc = true
+	}
+
+	sort.Slice(objects, func(i, j int) bool {
+		keyI := aws.ToString(objects[i].Key)
+		keyJ := aws.ToString(objects[j].Key)
+
+		seqI, hasSeqI := extractSequenceID(keyI)
+		seqJ, hasSeqJ := extractSequenceID(keyJ)
+
+		if hasSeqI && hasSeqJ {
+			if seqI != seqJ {
+				if isDesc {
+					return seqI > seqJ
+				}
+				return seqI < seqJ
+			}
+			if isDesc {
+				return keyI > keyJ
+			}
+			return keyI < keyJ
+		}
+
+		if hasSeqI != hasSeqJ {
+			return hasSeqI
+		}
+
+		if isDesc {
+			return keyI > keyJ
+		}
+		return keyI < keyJ
+	})
+}
+
+// Stream streams matching objects from S3 for this compiled query in exact sequence order across prefixes,
+// filtering out non-matching middle partition keys, applying OFFSET/LIMIT to metadata before downloading,
+// and using a bounded sliding-window concurrent prefetch pipeline.
 func (q *S3Query) Stream(
 	ctx context.Context,
 	client S3ClientAPI,
@@ -272,12 +438,9 @@ func (q *S3Query) Stream(
 			return
 		}
 
-		var count int64
-		var skipped int64
-		offset := int64(0)
-		if q.Offset != nil {
-			offset = *q.Offset
-		}
+		// 1. List lightweight metadata headers across all prefixes
+		seen := make(map[string]bool)
+		var matchedObjects []types.Object
 
 		for _, prefix := range q.Prefixes {
 			paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
@@ -292,44 +455,127 @@ func (q *S3Query) Stream(
 					return
 				}
 
-				for _, object := range page.Contents {
-					// Check offset skip
-					if skipped < offset {
-						skipped++
+				for _, item := range page.Contents {
+					key := aws.ToString(item.Key)
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+
+					// 2. Middle partition key filtering against KeyConstraints
+					if !q.matchesKeyConstraints(key) {
 						continue
 					}
 
-					// Check limit
-					if q.Limit != nil && count >= *q.Limit {
-						return
-					}
+					matchedObjects = append(matchedObjects, item)
+				}
+			}
+		}
 
+		// 3. Sort matched objects by sequence ID ascending (or descending if ORDER BY ... DESC)
+		q.sortObjects(matchedObjects)
+
+		// 4. Apply OFFSET and LIMIT directly to sorted slice BEFORE downloading bodies
+		if q.Offset != nil && *q.Offset > 0 {
+			offset := *q.Offset
+			if offset >= int64(len(matchedObjects)) {
+				matchedObjects = nil
+			} else {
+				matchedObjects = matchedObjects[offset:]
+			}
+		}
+
+		if q.Limit != nil && *q.Limit >= 0 {
+			limit := *q.Limit
+			if limit < int64(len(matchedObjects)) {
+				matchedObjects = matchedObjects[:limit]
+			}
+		}
+
+		if len(matchedObjects) == 0 {
+			return
+		}
+
+		// 5. Download payloads using bounded sliding-window concurrent prefetch pipeline
+		concurrency := q.PrefetchConcurrency
+		if concurrency <= 0 {
+			concurrency = 16
+		}
+		if concurrency > len(matchedObjects) {
+			concurrency = len(matchedObjects)
+		}
+
+		type downloadResult struct {
+			obj *S3Object
+			err error
+		}
+		type downloadTask struct {
+			resCh chan downloadResult
+		}
+
+		childCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		pipeline := make(chan downloadTask, concurrency)
+
+		// Feeder goroutine: launches bounded concurrent downloads in exact sequence order
+		go func() {
+			defer close(pipeline)
+			sem := make(chan struct{}, concurrency)
+
+			for _, meta := range matchedObjects {
+				select {
+				case <-childCtx.Done():
+					return
+				case sem <- struct{}{}:
+				}
+
+				resCh := make(chan downloadResult, 1)
+
+				select {
+				case <-childCtx.Done():
+					return
+				case pipeline <- downloadTask{resCh: resCh}:
+				}
+
+				go func(item types.Object) {
+					defer func() { <-sem }()
 					writer := manager.NewWriteAtBuffer(make([]byte, 0, 4096))
-					_, err := downloader.Download(ctx, writer, &s3.GetObjectInput{
+					_, err := downloader.Download(childCtx, writer, &s3.GetObjectInput{
 						Bucket: aws.String(q.Bucket),
-						Key:    object.Key,
+						Key:    item.Key,
 					})
 					if err != nil {
-						yield(nil, errnie.Error(err))
+						resCh <- downloadResult{nil, err}
 						return
 					}
-
-					s3Obj := &S3Object{
-						Key:          aws.ToString(object.Key),
-						Bucket:       q.Bucket,
-						Data:         writer.Bytes(),
-						Size:         aws.ToInt64(object.Size),
-						LastModified: object.LastModified,
+					resCh <- downloadResult{
+						obj: &S3Object{
+							Key:          aws.ToString(item.Key),
+							Bucket:       q.Bucket,
+							Data:         writer.Bytes(),
+							Size:         aws.ToInt64(item.Size),
+							LastModified: item.LastModified,
+						},
+						err: nil,
 					}
+				}(meta)
+			}
+		}()
 
-					count++
-					if !yield(s3Obj, nil) {
-						return
-					}
-
-					if q.Limit != nil && count >= *q.Limit {
-						return
-					}
+		// Consumer loop: yields objects in exact sequence order
+		for task := range pipeline {
+			select {
+			case <-childCtx.Done():
+				yield(nil, childCtx.Err())
+				return
+			case res := <-task.resCh:
+				if res.err != nil {
+					yield(nil, errnie.Error(res.err))
+					return
+				}
+				if !yield(res.obj, nil) {
+					return
 				}
 			}
 		}
@@ -566,7 +812,7 @@ func (b *S3Backend) Compile(plan *Plan) (*S3Query, error) {
 	partKeys := b.getPartitionKeys(tableName, plan.Where)
 
 	// 3. Generate S3 prefixes via partition pruning
-	prefixes, usedCols := b.generatePrefixes(tableBase, partKeys, plan.Where)
+	prefixes, usedCols, keyConstraints := b.generatePrefixes(tableBase, partKeys, plan.Where)
 
 	// 4. Extract projections / columns
 	columns, isStar := b.extractColumns(plan)
@@ -574,17 +820,27 @@ func (b *S3Backend) Compile(plan *Plan) (*S3Query, error) {
 	// 5. Extract residual predicates (filters not fully absorbed by partition prefixes)
 	predicates := b.extractResidualPredicates(plan.Where, usedCols)
 
+	concurrency := b.config.PrefetchConcurrency
+	if concurrency <= 0 {
+		concurrency = 16
+	}
+
 	query := &S3Query{
-		Bucket:        b.config.Bucket,
-		Table:         tableName,
-		Prefixes:      prefixes,
-		Columns:       columns,
-		IsStar:        isStar,
-		Predicates:    predicates,
-		Limit:         plan.Limit,
-		Offset:        plan.Offset,
-		Distinct:      plan.Distinct,
-		PartitionKeys: partKeys,
+		Bucket:              b.config.Bucket,
+		Table:               tableName,
+		TableBase:           tableBase,
+		Prefixes:            prefixes,
+		Columns:             columns,
+		IsStar:              isStar,
+		Predicates:          predicates,
+		Limit:               plan.Limit,
+		Offset:              plan.Offset,
+		Distinct:            plan.Distinct,
+		PartitionKeys:       partKeys,
+		PartitionStyle:      b.config.PartitionStyle,
+		KeyConstraints:      keyConstraints,
+		OrderBy:             plan.OrderBy,
+		PrefetchConcurrency: concurrency,
 	}
 
 	return query, nil
@@ -641,20 +897,34 @@ type partitionConstraint struct {
 	rangeMax string
 }
 
-func (b *S3Backend) generatePrefixes(tableBase string, partKeys []string, where Expr) ([]string, map[string]bool) {
+func (b *S3Backend) generatePrefixes(tableBase string, partKeys []string, where Expr) ([]string, map[string]bool, map[string][]string) {
 	usedCols := make(map[string]bool)
+	keyConstraints := make(map[string][]string)
 
 	if len(partKeys) == 0 || where == nil {
-		return []string{tableBase}, usedCols
+		return []string{tableBase}, usedCols, keyConstraints
 	}
 
 	// Extract constraints for partition keys
 	constraints := make(map[string]*partitionConstraint)
 	b.collectConstraints(where, constraints)
 
+	for _, pk := range partKeys {
+		if c, ok := constraints[pk]; ok {
+			if c.isRange {
+				rangeVals := b.expandDateRange(c.rangeMin, c.rangeMax)
+				if len(rangeVals) > 0 {
+					keyConstraints[pk] = rangeVals
+				}
+			} else if len(c.values) > 0 {
+				keyConstraints[pk] = c.values
+			}
+		}
+	}
+
 	// Check for top-level OR conditions on partition keys
 	if orPrefixes, ok := b.handleTopLevelOR(tableBase, partKeys, where, usedCols); ok {
-		return orPrefixes, usedCols
+		return orPrefixes, usedCols, keyConstraints
 	}
 
 	currentPrefixes := []string{tableBase}
@@ -697,7 +967,7 @@ func (b *S3Backend) generatePrefixes(tableBase string, partKeys []string, where 
 		currentPrefixes = nextPrefixes
 	}
 
-	return currentPrefixes, usedCols
+	return currentPrefixes, usedCols, keyConstraints
 }
 
 func (b *S3Backend) handleTopLevelOR(tableBase string, partKeys []string, where Expr, usedCols map[string]bool) ([]string, bool) {
@@ -924,15 +1194,15 @@ func (b *S3Backend) extractResidualPredicates(where Expr, usedCols map[string]bo
 					Value:    []any{node.From, node.To},
 				})
 			}
+		case *FuncExpr:
+			predicates = append(predicates, FilterPredicate{
+				Column:   node.Name,
+				Operator: "CALL",
+				Value:    node.String(),
+			})
 		case *LogicalExpr:
-			if strings.EqualFold(node.Operator, "AND") {
-				for _, sub := range node.Exprs {
-					walk(sub)
-				}
-			} else {
-				for _, sub := range node.Exprs {
-					walk(sub)
-				}
+			for _, sub := range node.Exprs {
+				walk(sub)
 			}
 		}
 	}

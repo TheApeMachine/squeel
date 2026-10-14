@@ -15,6 +15,8 @@ func setupRadixTestData() *RadixS3Client {
 	// 1. symm dataset (Flat partitioning: epoch/label/source/seq.bin)
 	mock.Set("symm/1713000000/cvd/kraken/1.bin", []byte(`{"epoch":1713000000,"label":"cvd","source":"kraken","seq":1}`))
 	mock.Set("symm/1713000000/cvd/kraken/2.bin", []byte(`{"epoch":1713000000,"label":"cvd","source":"kraken","seq":2}`))
+	mock.Set("symm/1713000000/cvd/kraken/10.bin", []byte(`{"epoch":1713000000,"label":"cvd","source":"kraken","seq":10}`))
+	mock.Set("symm/1713000000/cvd/coinbase/1.bin", []byte(`{"epoch":1713000000,"label":"cvd","source":"coinbase","seq":1}`))
 	mock.Set("symm/1713000000/trades/kraken/1.bin", []byte(`{"epoch":1713000000,"label":"trades","source":"kraken","seq":1}`))
 	mock.Set("symm/1713000000/depthflow/kraken/1.bin", []byte(`{"epoch":1713000000,"label":"depthflow","source":"kraken","seq":1}`))
 	mock.Set("symm/1713000001/cvd/kraken/1.bin", []byte(`{"epoch":1713000001,"label":"cvd","source":"kraken","seq":1}`))
@@ -98,8 +100,10 @@ var s3TestCases = []s3QueryTestCase{
 		},
 		ExpectedPrefixes: []string{"symm/1713000000/"},
 		ExpectedKeys: []string{
+			"symm/1713000000/cvd/coinbase/1.bin",
 			"symm/1713000000/cvd/kraken/1.bin",
 			"symm/1713000000/cvd/kraken/2.bin",
+			"symm/1713000000/cvd/kraken/10.bin",
 			"symm/1713000000/depthflow/kraken/1.bin",
 			"symm/1713000000/trades/kraken/1.bin",
 		},
@@ -113,8 +117,10 @@ var s3TestCases = []s3QueryTestCase{
 		},
 		ExpectedPrefixes: []string{"symm/1713000000/cvd/"},
 		ExpectedKeys: []string{
+			"symm/1713000000/cvd/coinbase/1.bin",
 			"symm/1713000000/cvd/kraken/1.bin",
 			"symm/1713000000/cvd/kraken/2.bin",
+			"symm/1713000000/cvd/kraken/10.bin",
 		},
 	},
 	{
@@ -128,6 +134,7 @@ var s3TestCases = []s3QueryTestCase{
 		ExpectedKeys: []string{
 			"symm/1713000000/cvd/kraken/1.bin",
 			"symm/1713000000/cvd/kraken/2.bin",
+			"symm/1713000000/cvd/kraken/10.bin",
 		},
 	},
 	{
@@ -142,8 +149,10 @@ var s3TestCases = []s3QueryTestCase{
 			"symm/1713000000/trades/",
 		},
 		ExpectedKeys: []string{
+			"symm/1713000000/cvd/coinbase/1.bin",
 			"symm/1713000000/cvd/kraken/1.bin",
 			"symm/1713000000/cvd/kraken/2.bin",
+			"symm/1713000000/cvd/kraken/10.bin",
 			"symm/1713000000/trades/kraken/1.bin",
 		},
 	},
@@ -394,8 +403,24 @@ var s3TestCases = []s3QueryTestCase{
 		},
 		ExpectedPrefixes: []string{"symm/1713000000/"},
 		ExpectedKeys: []string{
+			"symm/1713000000/cvd/coinbase/1.bin",
+			"symm/1713000000/cvd/kraken/1.bin",
+		},
+	},
+	{
+		Name: "Skipping middle partition key filters out non-matching objects",
+		SQL:  "SELECT * FROM symm WHERE epoch = 1713000000 AND source = 'kraken'",
+		Options: []S3Option{
+			WithPartitionStyle(FlatPartitioning),
+			WithPartitionKeys("symm", "epoch", "label", "source"),
+		},
+		ExpectedPrefixes: []string{"symm/1713000000/"},
+		ExpectedKeys: []string{
 			"symm/1713000000/cvd/kraken/1.bin",
 			"symm/1713000000/cvd/kraken/2.bin",
+			"symm/1713000000/cvd/kraken/10.bin",
+			"symm/1713000000/depthflow/kraken/1.bin",
+			"symm/1713000000/trades/kraken/1.bin",
 		},
 	},
 }
@@ -482,3 +507,120 @@ func TestS3RadixQueries(t *testing.T) {
 		}
 	})
 }
+
+func TestS3OrderedReplayAndPrefetch(t *testing.T) {
+	ctx := context.Background()
+	radixClient := setupRadixTestData()
+
+	Convey("Given an S3Backend configured for hardware-speed ordered replay", t, func() {
+		Convey("1. Global sequence ordering interleaves across prefixes and sorts naturally", func() {
+			sql := "SELECT * FROM symm WHERE epoch = 1713000000 AND label IN ('cvd', 'trades') AND source = 'kraken'"
+			stmt := NewStatement(sql)
+			s3Backend := NewS3Backend(
+				WithS3Client(radixClient),
+				WithPartitionStyle(FlatPartitioning),
+				WithPartitionKeys("symm", "epoch", "label", "source"),
+				WithPrefetchConcurrency(16),
+			)
+
+			plan, err := stmt.Parse()
+			So(err, ShouldBeNil)
+
+			var receivedKeys []string
+			for obj, streamErr := range s3Backend.StreamObjects(ctx, plan) {
+				So(streamErr, ShouldBeNil)
+				receivedKeys = append(receivedKeys, obj.Key)
+			}
+
+			// Validate exact chronological sequence ordering WITHOUT calling sort.Strings:
+			// seq 1 across prefixes (cvd, then trades) must precede seq 2 (cvd/2.bin),
+			// and seq 2 must precede seq 10 (cvd/10.bin)
+			expectedOrder := []string{
+				"symm/1713000000/cvd/kraken/1.bin",
+				"symm/1713000000/trades/kraken/1.bin",
+				"symm/1713000000/cvd/kraken/2.bin",
+				"symm/1713000000/cvd/kraken/10.bin",
+			}
+			So(receivedKeys, ShouldResemble, expectedOrder)
+		})
+
+		Convey("2. ORDER BY seq DESC yields keys in reverse chronological sequence order", func() {
+			sql := "SELECT * FROM symm WHERE epoch = 1713000000 AND label = 'cvd' AND source = 'kraken' ORDER BY seq DESC"
+			stmt := NewStatement(sql)
+			s3Backend := NewS3Backend(
+				WithS3Client(radixClient),
+				WithPartitionStyle(FlatPartitioning),
+				WithPartitionKeys("symm", "epoch", "label", "source"),
+				WithPrefetchConcurrency(8),
+			)
+
+			plan, err := stmt.Parse()
+			So(err, ShouldBeNil)
+
+			var receivedKeys []string
+			for obj, streamErr := range s3Backend.StreamObjects(ctx, plan) {
+				So(streamErr, ShouldBeNil)
+				receivedKeys = append(receivedKeys, obj.Key)
+			}
+
+			expectedDesc := []string{
+				"symm/1713000000/cvd/kraken/10.bin",
+				"symm/1713000000/cvd/kraken/2.bin",
+				"symm/1713000000/cvd/kraken/1.bin",
+			}
+			So(receivedKeys, ShouldResemble, expectedDesc)
+		})
+
+		Convey("3. Missing middle partition key filters out non-matching deeper partition levels", func() {
+			// Partition hierarchy is (epoch, label, source).
+			// Middle key 'label' is omitted in WHERE, while 'source = kraken' is specified.
+			sql := "SELECT * FROM symm WHERE epoch = 1713000000 AND source = 'kraken'"
+			stmt := NewStatement(sql)
+			s3Backend := NewS3Backend(
+				WithS3Client(radixClient),
+				WithPartitionStyle(FlatPartitioning),
+				WithPartitionKeys("symm", "epoch", "label", "source"),
+			)
+
+			plan, err := stmt.Parse()
+			So(err, ShouldBeNil)
+
+			var receivedKeys []string
+			for obj, streamErr := range s3Backend.StreamObjects(ctx, plan) {
+				So(streamErr, ShouldBeNil)
+				receivedKeys = append(receivedKeys, obj.Key)
+			}
+
+			// Ensure coinbase is NEVER downloaded
+			for _, k := range receivedKeys {
+				So(k, ShouldNotContainSubstring, "coinbase")
+				So(k, ShouldContainSubstring, "kraken")
+			}
+			So(len(receivedKeys), ShouldEqual, 5)
+		})
+
+		Convey("4. Bounded sliding-window prefetch pipeline yields identical payload data", func() {
+			sql := "SELECT * FROM symm WHERE epoch = 1713000000 AND label = 'cvd' AND source = 'kraken'"
+			stmt := NewStatement(sql)
+			s3Backend := NewS3Backend(
+				WithS3Client(radixClient),
+				WithPartitionStyle(FlatPartitioning),
+				WithPartitionKeys("symm", "epoch", "label", "source"),
+				WithPrefetchConcurrency(2), // Test small sliding window constraint
+			)
+
+			plan, err := stmt.Parse()
+			So(err, ShouldBeNil)
+
+			count := 0
+			for obj, streamErr := range s3Backend.StreamObjects(ctx, plan) {
+				So(streamErr, ShouldBeNil)
+				So(len(obj.Data), ShouldBeGreaterThan, 0)
+				So(string(obj.Data), ShouldContainSubstring, `"source":"kraken"`)
+				count++
+			}
+			So(count, ShouldEqual, 3)
+		})
+	})
+}
+
