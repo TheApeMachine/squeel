@@ -4,11 +4,9 @@ import (
 	b64 "encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strconv"
 	"strings"
 
 	errnie "github.com/theapemachine/errnie/v3"
-	"github.com/xwb1989/sqlparser"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -28,17 +26,6 @@ func (statement *Statement) makeLegacyBinVal(value string) (
 		Subtype: 3,
 		Data:    out,
 	}, errnie.Error(err)
-}
-
-/*
-makeint64Pointer converts a SQL value to an int64 pointer. This is useful
-
-when dealing with nullable integer columns in SQL that need to be represented
-as pointers in Go.
-*/
-func (statement *Statement) makeint64Pointer(value *sqlparser.SQLVal) (*int64, error) {
-	tmp, err := strconv.ParseInt(string(value.Val), 10, 64)
-	return &tmp, errnie.Error(err)
 }
 
 /*

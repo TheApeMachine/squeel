@@ -1,211 +1,155 @@
 package squeel
 
 import (
+	"context"
 	"fmt"
-	"reflect"
+	"iter"
 
 	errnie "github.com/theapemachine/errnie/v3"
-	"github.com/xwb1989/sqlparser"
+	"github.com/theapemachine/squeel/backend"
 )
 
+func init() {
+	backend.SetSQLHandler(func(sql string, query *backend.Query) *backend.Query {
+		stmt := NewStatement(sql)
+		var err error
+		if query, err = stmt.Build(query); errnie.Error(err) != nil {
+			return nil
+		}
+		return query
+	})
+}
+
 /*
-Statement represents a SQL statement that can be parsed and converted into
-a MongoDB query. It maintains both the raw SQL string and the parsed AST
-representation of the statement.
+Statement represents a SQL statement that can be parsed into an abstract Plan
+and compiled or executed across any backend implementing the adapter interfaces.
 */
 type Statement struct {
-	raw  string              // The original SQL query string
-	stmt sqlparser.Statement // The parsed SQL statement AST
-	err  error               // Any error that occurred during parsing
+	raw     string
+	plan    *Plan
+	err     error
+	backend AnyBackend
 }
 
-/*
-NewStatement creates a new Statement instance from a raw SQL query string.
-It initializes the statement with the raw SQL but does not parse it until
-Build is called.
-
-Parameters:
-- raw: The SQL query string to be parsed
-
-Returns:
-- A new Statement instance ready for building
-*/
-func NewStatement(raw string) *Statement {
-	return &Statement{raw: raw}
-}
-
-/*
-Build processes the SQL statement and constructs a MongoDB query configuration.
-It first validates the statement, then parses the SQL and walks through the
-AST to build the appropriate MongoDB query components.
-
-Parameters:
-- q: The Query object to populate with MongoDB query configuration
-
-Returns:
-- The populated Query object
-- Any error that occurred during building
-*/
-func (statement *Statement) Build(q *Query) (*Query, error) {
-	if err := statement.validate(); err != nil {
-		return q, err
+// NewStatement creates a new Statement instance from a raw SQL query string and an optional backend interface.
+func NewStatement(raw string, b ...AnyBackend) *Statement {
+	stmt := &Statement{raw: raw}
+	if len(b) > 0 && b[0] != nil {
+		stmt.backend = b[0]
 	}
-
-	if err := statement.parseSQL(q); err != nil {
-		return q, err
-	}
-
-	return statement.finalizeQuery(q)
+	return stmt
 }
 
-/*
-validate performs basic validation on the Statement instance to ensure
-it is ready for parsing. It checks for nil statement and existing errors.
+// WithBackend attaches a backend adapter interface to the statement.
+func (statement *Statement) WithBackend(b AnyBackend) *Statement {
+	statement.backend = b
+	return statement
+}
 
-Returns:
-- Any validation error that occurred
-*/
-func (statement *Statement) validate() error {
+// Backend returns the currently attached backend adapter interface, if any.
+func (statement *Statement) Backend() AnyBackend {
+	return statement.backend
+}
+
+// Parse parses the raw SQL statement into an abstract, storage-agnostic Plan.
+func (statement *Statement) Parse() (*Plan, error) {
 	if statement == nil {
-		return fmt.Errorf("statement is nil")
+		return nil, errnie.Error(fmt.Errorf("statement is nil"))
 	}
 	if statement.err != nil {
-		return statement.err
+		return nil, statement.err
 	}
-	return nil
-}
+	if statement.plan != nil {
+		return statement.plan, nil
+	}
 
-/*
-parseSQL parses the raw SQL string into an AST and processes it to build
-the MongoDB query configuration. It uses the sqlparser library to parse
-the SQL and then walks through the AST nodes to construct the query.
-
-Parameters:
-- q: The Query object to populate during parsing
-
-Returns:
-- Any error that occurred during parsing or processing
-*/
-func (statement *Statement) parseSQL(q *Query) error {
-	var err error
-	statement.stmt, err = sqlparser.Parse(statement.raw)
+	plan, err := ParseSQL(statement.raw)
 	if err != nil {
-		return errnie.Error(err)
+		statement.err = err
+		return nil, err
 	}
-
-	return errnie.Error(sqlparser.Walk(statement.walkNode(q), statement.stmt))
+	statement.plan = plan
+	return plan, nil
 }
 
-/*
-walkNode returns a function that processes each node in the SQL AST.
-It handles different types of SQL nodes (SELECT, WHERE, etc.) and updates
-the Query object accordingly. Unhandled node types are tracked but not processed.
-
-Parameters:
-- q: The Query object to modify during AST traversal
-
-Returns:
-  - A function that processes each AST node and returns whether to continue walking
-    and any error that occurred
-*/
-func (statement *Statement) walkNode(q *Query) func(node sqlparser.SQLNode) (bool, error) {
-	unhandledTypes := make(map[string]bool)
-
-	return func(node sqlparser.SQLNode) (bool, error) {
-		switch node := node.(type) {
-		case sqlparser.TableName:
-			q = statement.parseTable(q, node)
-		case *sqlparser.Select:
-			q = statement.handleSelectNode(q, node)
-		case sqlparser.SelectExprs:
-			q = statement.parseSelect(q, node)
-		case *sqlparser.Where:
-			q = statement.parseWhere(q, node)
-		case *sqlparser.Limit:
-			q = statement.parseLimit(q, node)
-		case *sqlparser.FuncExpr:
-			q = statement.parseFunc(q, node)
-		case *sqlparser.JoinTableExpr:
-			q = statement.parseJoin(q, node)
-		case *sqlparser.AliasedExpr:
-			statement.handleAliasedExpr(q, node)
-		case sqlparser.TableExprs:
-			// No-op
-		default:
-			nodeType := reflect.TypeOf(node).String()
-			unhandledTypes[nodeType] = true
-		}
-		return true, nil
+// Compile compiles the statement using the provided backend interface, or the statement's attached backend.
+func (statement *Statement) Compile(b ...AnyBackend) (any, error) {
+	plan, err := statement.Parse()
+	if err != nil {
+		return nil, err
 	}
+	target := statement.backend
+	if len(b) > 0 && b[0] != nil {
+		target = b[0]
+	}
+	if target == nil {
+		return nil, errnie.Error(fmt.Errorf("no backend configured for statement compilation"))
+	}
+	return target.CompileAny(plan)
 }
 
-/*
-handleSelectNode processes a SELECT statement node, configuring the Query
-object with the appropriate MongoDB operation type and processing various
-clauses like GROUP BY, HAVING, and ORDER BY.
-
-Parameters:
-- q: The Query object to modify
-- node: The SELECT statement node to process
-
-Returns:
-- The modified Query object
-*/
-func (statement *Statement) handleSelectNode(q *Query, node *sqlparser.Select) *Query {
-	if q.Collection == "" {
-		statement.setupQueryFromClause(q, node.From)
+// Execute executes the statement using the provided executor interface, or the statement's attached backend.
+func (statement *Statement) Execute(ctx context.Context, executor ...AnyExecutor) (any, error) {
+	plan, err := statement.Parse()
+	if err != nil {
+		return nil, err
 	}
-	if node.Distinct != "" {
-		q.Operation = "distinct"
-	} else if q.Operation == "" {
-		q.Operation = "find"
+	var exec AnyExecutor
+	if len(executor) > 0 && executor[0] != nil {
+		exec = executor[0]
+	} else if e, ok := statement.backend.(AnyExecutor); ok {
+		exec = e
 	}
-	q = statement.parseGroupBy(q, node.GroupBy, node.Having)
-	return statement.parseOrderBy(q, node.OrderBy)
+	if exec == nil {
+		return nil, errnie.Error(fmt.Errorf("backend does not implement Executor interface"))
+	}
+	return exec.ExecuteAny(ctx, plan)
 }
 
-/*
-handleAliasedExpr processes an aliased expression, particularly handling
-subqueries by recursively building them into the aggregation pipeline.
-
-Parameters:
-- q: The Query object to modify
-- node: The aliased expression node to process
-*/
-func (statement *Statement) handleAliasedExpr(q *Query, node *sqlparser.AliasedExpr) {
-	if subquery, ok := node.Expr.(*sqlparser.Subquery); ok {
-		subQ := NewQuery()
-		subStmt := &Statement{raw: sqlparser.String(subquery.Select)}
-		if _, err := subStmt.Build(subQ); err == nil {
-			q.Pipeline = append(q.Pipeline, subQ.Pipeline...)
+// Stream streams data for the statement using the provided streamer interface, or the statement's attached backend.
+func (statement *Statement) Stream(ctx context.Context, streamer ...Streamer) iter.Seq2[[]byte, error] {
+	plan, err := statement.Parse()
+	if err != nil {
+		return func(yield func([]byte, error) bool) {
+			yield(nil, err)
 		}
 	}
-}
-
-/*
-finalizeQuery performs final adjustments to the Query object based on the
-SQL statement type and its components. It determines whether the query needs
-to use MongoDB's aggregation framework based on various factors.
-
-Parameters:
-- q: The Query object to finalize
-
-Returns:
-- The finalized Query object
-- Any error that occurred during finalization
-*/
-func (statement *Statement) finalizeQuery(q *Query) (*Query, error) {
-	if selectNode, ok := statement.stmt.(*sqlparser.Select); ok {
-		needsAggregate := len(selectNode.GroupBy) > 0 ||
-			selectNode.Having != nil ||
-			len(selectNode.OrderBy) > 0 ||
-			len(selectNode.From) > 1
-
-		if needsAggregate && q.Operation != "count" {
-			q.Operation = "aggregate"
-		} else if q.Operation == "" {
-			q.Operation = "find"
+	var s Streamer
+	if len(streamer) > 0 && streamer[0] != nil {
+		s = streamer[0]
+	} else if st, ok := statement.backend.(Streamer); ok {
+		s = st
+	}
+	if s == nil {
+		return func(yield func([]byte, error) bool) {
+			yield(nil, errnie.Error(fmt.Errorf("backend does not implement Streamer interface")))
 		}
 	}
-	return q, nil
+	return s.Stream(ctx, plan)
+}
+
+// Build compiles the SQL statement into the target query structure using the attached backend's QueryBuilder interface.
+// If no backend is attached, it defaults to using the MongoDB QueryBuilder.
+func (statement *Statement) Build(target any) (*Query, error) {
+	plan, err := statement.Parse()
+	if err != nil {
+		if q, ok := target.(*Query); ok {
+			return q, err
+		}
+		return nil, err
+	}
+
+	if qb, ok := statement.backend.(QueryBuilder); ok {
+		res, err := qb.Build(plan, target)
+		if q, ok := res.(*Query); ok {
+			return q, err
+		}
+		return nil, err
+	}
+
+	// Default fallback to MongoDB query builder if target is *Query
+	if q, ok := target.(*Query); ok {
+		return NewMongoBackend().CompileWithQuery(plan, q)
+	}
+	return nil, errnie.Error(fmt.Errorf("unsupported build target type %T", target))
 }

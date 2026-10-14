@@ -41,7 +41,7 @@ const (
 	refPrice      = "$price"
 )
 
-var stmts = []map[string]interface{}{{
+var stmts = []map[string]any{{
 	"sql":   "SQL (MYSQL DIALECT) TO MONGO WITH OPTIMIZER, LET'S GO!",
 	"error": "syntax error at position 4 near 'sql'",
 }, {
@@ -107,7 +107,7 @@ var stmts = []map[string]interface{}{{
 	"operation":  "find",
 	"collection": "User",
 	"filter": bson.D{
-		{Key: "Accounts", Value: bson.M{"$in": []interface{}{uuidBin}}},
+		{Key: "Accounts", Value: bson.M{"$in": []any{uuidBin}}},
 	},
 }, {
 	"sql":        "SELECT * FROM questions WHERE theme = 'Erkenning & Waardering'",
@@ -355,13 +355,13 @@ func TestSqueel(t *testing.T) {
 
 type testCase struct {
 	idx  int
-	stmt map[string]interface{}
+	stmt map[string]any
 	q    *Query
 	err  error
 	sql  string
 }
 
-func newTestCase(idx int, stmt map[string]interface{}) *testCase {
+func newTestCase(idx int, stmt map[string]any) *testCase {
 	return &testCase{
 		idx:  idx,
 		stmt: stmt,
