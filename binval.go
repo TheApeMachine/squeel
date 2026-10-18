@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	errnie "github.com/theapemachine/errnie/v3"
+	"github.com/theapemachine/errnie"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 

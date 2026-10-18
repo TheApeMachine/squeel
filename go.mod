@@ -9,8 +9,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.14
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/gofiber/fiber/v3 v3.0.0-beta.3
+	github.com/hashicorp/go-immutable-radix v1.3.1
 	github.com/smartystreets/goconvey v1.8.1
-	github.com/theapemachine/errnie/v3 v3.0.3
+	github.com/theapemachine/errnie v1.2.10
 	github.com/xwb1989/sqlparser v0.0.0-20180606152119-120387863bf2
 	go.mongodb.org/mongo-driver v1.17.1
 )
@@ -42,7 +43,6 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
-	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/golang-lru v0.5.0 // indirect
 	github.com/jtolds/gls v4.20.0+incompatible // indirect
 	github.com/klauspost/compress v1.18.6 // indirect

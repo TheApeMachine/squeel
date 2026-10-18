@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	errnie "github.com/theapemachine/errnie/v3"
+	"github.com/theapemachine/errnie"
 	"github.com/xwb1989/sqlparser"
 )
 

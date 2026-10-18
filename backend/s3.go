@@ -20,7 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	errnie "github.com/theapemachine/errnie/v3"
+	"github.com/theapemachine/errnie"
 )
 
 // S3ClientAPI specifies the AWS S3 client operations used for object listing and downloading.

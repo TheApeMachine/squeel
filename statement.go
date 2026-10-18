@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"iter"
 
-	errnie "github.com/theapemachine/errnie/v3"
+	"github.com/theapemachine/errnie"
 	"github.com/theapemachine/squeel/backend"
 )
 

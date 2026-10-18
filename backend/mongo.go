@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	errnie "github.com/theapemachine/errnie/v3"
+	"github.com/theapemachine/errnie"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
